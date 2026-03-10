@@ -1,0 +1,261 @@
+---
+title: "Story 3 — Do Stricter Gun Laws Reduce Firearm Mortality?"
+author: "Joao De Oliveira"
+format:
+  pdf:
+    pdf-engine: lualatex
+    toc: true
+    number-sections: true
+engine: python
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+## Introduction
+
+Firearm deaths continue to be a major public issue in the United States, and gun laws vary significantly across states. This analysis explores whether states with stricter gun laws tend to experience lower firearm mortality rates. Using firearm mortality data from the CDC and a five-point Likert scale categorizing the strictness of state gun laws, the visualizations compare firearm death rates across states and regulatory environments. The goal is to identify whether a pattern exists between gun law strictness and firearm mortality.
+
+**Story framework:**
+
+1. Compare firearm mortality across states.
+2. Convert state gun law strength into a 5-point Likert scale from **Very Lax** to **Very Strict**.
+3. Compare firearm mortality to gun law strictness using heat maps.
+4. Conclude whether the overall pattern is consistent with stricter laws being associated with lower firearm mortality.
+
+**Important note:** This is an observational state-level comparison. It can show **association**, not prove causation.
+
+## Why this story meets the assignment requirements
+
+- It accesses firearm mortality from the **CDC API**.
+- It creates a **5-point Likert scale** for gun law strictness.
+- It presents the story using **heat maps**.
+- It uses **accessible color palettes** (`cividis` and `viridis`).
+- It uses a different visualization library than the earlier stories: **seaborn**.
+
+## Libraries
+
+```{python}
+import requests
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+sns.set_theme(style="whitegrid", font_scale=1.2)
+```
+
+```{python}
+sns.set_theme(style="white", font_scale=0.9)
+plt.rcParams["figure.dpi"] = 140
+```
+
+### Pull firearm mortality from the CDC API
+
+```{python}
+CDC_APP_TOKEN = ""   # optional
+CDC_DATASET = "fpsi-y8tj"
+CDC_URL = f"https://data.cdc.gov/api/views/{CDC_DATASET}/rows.csv?accessType=DOWNLOAD"
+```
+
+```{python}
+raw = pd.read_csv(CDC_URL)
+raw.columns = [c.lower().strip() for c in raw.columns]
+
+print(raw.columns.tolist())
+raw.head()
+```
+
+```{python}
+# firearm deaths only
+fire = raw[raw["intent"] == "FA_Deaths"].copy()
+
+fire["period"] = pd.to_numeric(fire["period"], errors="coerce")
+fire["rate"] = pd.to_numeric(fire["rate"], errors="coerce")
+
+# latest available year
+latest_year = int(fire["period"].max())
+
+mortality = (
+    fire.loc[fire["period"] == latest_year, ["name", "rate"]]
+    .rename(columns={"name": "state", "rate": "firearm_mortality_rate"})
+    .sort_values("state")
+    .reset_index(drop=True)
+)
+
+mortality["year"] = latest_year
+
+mortality.head()
+```
+
+
+### Build the 5-point Likert scale for gun law strictness
+
+Five-point scale from **Very Lax** to **Very Strict**. I use the published **GIFFORDS gun law strength ranks** and convert the 1–50 ranking into 5 bins:
+
+- **5 = Very Strict** → ranks 1–10  
+- **4 = Strict** → ranks 11–20  
+- **3 = Moderate** → ranks 21–30  
+- **2 = Lax** → ranks 31–40  
+- **1 = Very Lax** → ranks 41–50  
+
+
+### Create the likert dataset
+
+```{python}
+gun_law_data = pd.DataFrame({
+"state":[
+"Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut","Delaware",
+"Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa","Kansas","Kentucky",
+"Louisiana","Maine","Maryland","Massachusetts","Michigan","Minnesota","Mississippi",
+"Missouri","Montana","Nebraska","Nevada","New Hampshire","New Jersey","New Mexico",
+"New York","North Carolina","North Dakota","Ohio","Oklahoma","Oregon","Pennsylvania",
+"Rhode Island","South Carolina","South Dakota","Tennessee","Texas","Utah","Vermont",
+"Virginia","Washington","West Virginia","Wisconsin","Wyoming"
+],
+
+"law_strictness":[
+1,1,1,1,5,3,4,4,
+2,2,4,1,4,2,2,2,2,
+2,2,4,5,2,4,1,
+1,1,2,3,2,5,3,
+5,2,1,2,1,4,2,
+4,2,1,2,2,2,4,
+3,4,1,3,1
+]
+})
+```
+
+### Category Labels 
+
+```{python}
+likert_labels = {
+1:"Very Lax",
+2:"Lax",
+3:"Moderate",
+4:"Strict",
+5:"Very Strict"
+}
+
+gun_law_data["law_category"] = gun_law_data["law_strictness"].map(likert_labels)
+
+gun_law_data.head()
+```
+
+```{python}
+gun_law_data.loc[len(gun_law_data)] = ["District of Columbia", 5, "Very Strict"]
+
+mortality["state"] = mortality["state"].str.strip()
+gun_law_data["state"] = gun_law_data["state"].str.strip()
+```
+
+
+### Merge mortality with CDC mortality data
+
+```{python}
+data = mortality.merge(gun_law_data, on="state", how="left")
+
+data.head()
+```
+
+```{python}
+data.isna().sum()
+```
+
+
+## Heat Map 1 - Firearm Mortality by State
+
+States such as Mississippi, New Mexico, and Alaska show the highest firearm mortality rates, while states like Hawaii, Massachusetts, and New Jersey have the lowest rates. In general, firearm mortality is highest in Southern and Mountain states and is lower in Northeast states.
+
+
+```{python}
+data_sorted = data.sort_values("firearm_mortality_rate", ascending=False)
+
+plt.figure(figsize=(10,12))
+
+sns.heatmap(
+    data_sorted[["firearm_mortality_rate"]],
+    cmap="viridis",  # accessible palette
+    yticklabels=data_sorted["state"],
+    annot=True,
+    fmt=".1f",
+    annot_kws={"size":9},
+    cbar_kws={"label": "Firearm Death Rate per 100,000"}
+)
+
+plt.title("Firearm Mortality Rates Range from Under 5 to Nearly 30 Deaths per 100,000 Across States.")
+
+plt.xlabel("")
+plt.ylabel("State")
+
+plt.tight_layout()
+plt.show()
+```
+
+
+
+## Heat Map 2 - Gun Law Strictness by State
+
+States in the Northeast and on the West Coast tend to have stricter gun laws, while many states in the South and Mountain West have more permissive regulations.
+
+
+```{python}
+data_sorted_law = data.sort_values("law_strictness", ascending=False)
+
+plt.figure(figsize=(10,12))
+
+sns.heatmap(
+    data_sorted_law[["law_strictness"]],
+    cmap="cividis",  # colorblind-safe palette
+    yticklabels=data_sorted_law["state"],
+    cbar_kws={"label": "Gun Law Strictness (1=Lax, 5=Strict)"}
+)
+
+plt.title("U.S. States Differ Widely in the Strictness of Their Gun Laws.")
+plt.xlabel("")
+plt.ylabel("State")
+
+plt.tight_layout()
+plt.show()
+```
+
+
+## Heat Map 3 - Relationship Between Law Strictness and Mortality
+
+States categorized as having very lax gun laws show the highest average firearm mortality, while states with very strict laws have the lowest average rates.
+
+```{python}
+pivot = data.pivot_table(
+    values="firearm_mortality_rate",
+    index="law_category",
+    aggfunc="mean"
+)
+
+# reorder the Likert scale
+order = ["Very Lax","Lax","Moderate","Strict","Very Strict"]
+pivot = pivot.reindex(order)
+
+plt.figure(figsize=(6,4))
+
+sns.heatmap(
+    pivot,
+    annot=True,
+    annot_kws={"size":14,"weight":"bold"},
+    cmap="magma",
+    cbar_kws={"label":"Average Firearm Mortality Rate"}
+)
+
+plt.title("States with Stricter Gun Laws Tend to Have Lower Firearm Mortality")
+
+plt.xlabel("")
+plt.ylabel("Gun Law Category")
+
+plt.tight_layout()
+plt.show()
+```
+
+
+## Conclusion
+
+The visualizations suggest that states with stricter gun laws generally experience lower firearm mortality rates. States categorized as having very lax gun laws show the highest average death rates, while states with very strict laws show the lowest. Although the relationship is not perfectly consistent across every category, the overall pattern indicates that stronger firearm regulations are associated with lower levels of firearm mortality. Further analysis would be needed to determine whether this relationship is causal.
