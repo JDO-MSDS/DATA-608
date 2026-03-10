@@ -1,0 +1,335 @@
+---
+title: "Data 608 - Story 1- Funding Allocation: Equity and Political Bias"
+author: "Joao De Oliveira"
+format:
+  pdf:
+    pdf-engine: lualatex
+    toc: true
+    number-sections: true
+engine: python
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+## Introduction
+
+This report aims to evaluate whether the current allocation of Infrastructure Investment and Jobs Act (IIJA) funding across U.S. States and Territories is:
+
+1. **Equitable relative to population**, and
+2. **Consistent with political favoritism** toward states aligned with the Biden administration.
+
+**Key approach**
+
+**Equity Index** = (Funding Share) / (Population Share)
+
+- Equity Index ≈ 1.0 → proportional to population  
+- Equity Index > 1.0 → higher share of funding than population share  
+- Equity Index < 1.0 → lower share of funding than population share
+
+An equity index near 1.0 suggests proportional allocation by population. Values above 1.0 indicate a place receives a higher share of funding than its share of population; values below 1.0 means the opposite.
+
+- **Political check:** the goal is to compare per-capita funding between Biden-won vs. non-Biden-won states in the 2020 election, and then run a simple regression that controls for population size (since small states usually receive higher per-capita amounts regardless of politics).
+
+This analysis uses per-capita funding and an equity index to evaluate whether IIJA allocations are proportional to population, and applies regression analysis to assess whether political alignment in the 2020 presidential election is associated with higher funding after controlling for population size. The story framework centers on identifying structural patterns (such as small-state advantages) rather than isolated outliers.
+---
+
+## Load IIJA funding data
+
+```{python}
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
+import statsmodels.api as sm
+
+data_path = "C:/Users/jpfer/IIJA FUNDING AS OF MARCH 2023.xlsx"
+
+iija_raw = pd.read_excel(data_path)
+iija_raw.head()
+```
+
+
+```{python}
+df = iija_raw.copy()
+
+if df.shape[1] == 2:
+    df.columns = ["place", "funding_bil"]
+else:
+    df = df.iloc[:, [0, 1]].copy()
+    df.columns = ["place", "funding_bil"]
+
+df["place"] = df["place"].astype(str).str.strip()
+df["funding_bil"] = pd.to_numeric(df["funding_bil"], errors="coerce")
+
+df.head()
+```
+
+
+```{python}
+df = iija_raw.copy()
+
+if df.shape[1] == 2:
+    df.columns = ["place", "funding_bil"]
+else:
+    df = df.iloc[:, [0, 1]].copy()
+    df.columns = ["place", "funding_bil"]
+
+df["place"] = df["place"].astype(str).str.strip()
+df["funding_bil"] = pd.to_numeric(df["funding_bil"], errors="coerce")
+
+df.head()
+```
+
+```{python}
+def norm_place(p: str) -> str:
+    p = str(p).strip()
+
+    p = p.title()
+
+    p = p.replace("District Of Columbia", "District of Columbia")
+    p = p.replace("D.C.", "District of Columbia")
+
+    p = p.replace("Us Virgin Islands", "U.S. Virgin Islands")
+    p = p.replace("U.s. Virgin Islands", "U.S. Virgin Islands")
+
+    p = p.replace("Deleware", "Delaware")
+
+    return p
+
+df["place_norm"] = df["place"].apply(norm_place)
+
+df[["place", "place_norm"]].head()
+```
+
+```{python}
+# 2020 Census resident population from census
+POP_2020 = {
+    "Alabama": 5024279,
+    "Alaska": 733391,
+    "Arizona": 7151502,
+    "Arkansas": 3011524,
+    "California": 39538223,
+    "Colorado": 5773714,
+    "Connecticut": 3605944,
+    "Delaware": 989948,
+    "District of Columbia": 689545,
+    "Florida": 21538187,
+    "Georgia": 10711908,
+    "Hawaii": 1455271,
+    "Idaho": 1839106,
+    "Illinois": 12812508,
+    "Indiana": 6785528,
+    "Iowa": 3190369,
+    "Kansas": 2937880,
+    "Kentucky": 4505836,
+    "Louisiana": 4657757,
+    "Maine": 1362359,
+    "Maryland": 6177224,
+    "Massachusetts": 7029917,
+    "Michigan": 10077331,
+    "Minnesota": 5706494,
+    "Mississippi": 2961279,
+    "Missouri": 6154913,
+    "Montana": 1084225,
+    "Nebraska": 1961504,
+    "Nevada": 3104614,
+    "New Hampshire": 1377529,
+    "New Jersey": 9288994,
+    "New Mexico": 2117522,
+    "New York": 20201249,
+    "North Carolina": 10439388,
+    "North Dakota": 779094,
+    "Ohio": 11799448,
+    "Oklahoma": 3959353,
+    "Oregon": 4237256,
+    "Pennsylvania": 13002700,
+    "Rhode Island": 1097379,
+    "South Carolina": 5118425,
+    "South Dakota": 886667,
+    "Tennessee": 6910840,
+    "Texas": 29145505,
+    "Utah": 3271616,
+    "Vermont": 643077,
+    "Virginia": 8631393,
+    "Washington": 7705281,
+    "West Virginia": 1793716,
+    "Wisconsin": 5893718,
+    "Wyoming": 576851,
+    "Puerto Rico": 3285874,
+}
+
+# Territories
+TERRITORIES_2020 = {
+    "Guam": 153836,
+    "American Samoa": 49710,
+    "Northern Mariana Islands": 47329,
+    "U.S. Virgin Islands": 87146,
+}
+
+POP_2020_ALL = {**POP_2020, **TERRITORIES_2020}
+
+pop_df = pd.DataFrame({
+    "place_norm": list(POP_2020_ALL.keys()),
+    "pop_2020": list(POP_2020_ALL.values())
+})
+
+merged = df.merge(pop_df, on="place_norm", how="left")
+merged.head()
+```
+
+```{python}
+unmatched = merged.loc[merged["pop_2020"].isna(), ["place", "place_norm", "funding_bil"]].sort_values("funding_bil", ascending=False)
+unmatched.head(25)
+```
+
+```{python}
+analysis = merged.dropna(subset=["pop_2020", "funding_bil"]).copy()
+
+analysis["funding_total"] = analysis["funding_bil"] * 1e9
+analysis["funding_per_capita"] = analysis["funding_total"] / analysis["pop_2020"]
+
+analysis["funding_share"] = analysis["funding_total"] / analysis["funding_total"].sum()
+analysis["pop_share"] = analysis["pop_2020"] / analysis["pop_2020"].sum()
+analysis["equity_index"] = analysis["funding_share"] / analysis["pop_share"]
+
+analysis[["place_norm","funding_bil","pop_2020","funding_per_capita","equity_index"]].head()
+```
+
+## Question 1
+
+```{python}
+# plot 1 max and min pop funding
+def dollar(x, pos):
+    return f"${x:,.0f}"
+
+top = analysis.sort_values("funding_per_capita", ascending=False).head(15).sort_values("funding_per_capita")
+bot = analysis.sort_values("funding_per_capita", ascending=True).head(15).sort_values("funding_per_capita")
+
+plt.figure(figsize=(8,6))
+plt.barh(top["place_norm"], top["funding_per_capita"])
+plt.gca().xaxis.set_major_formatter(FuncFormatter(dollar))
+plt.title("Smaller States and Territories Receive the Highest IIJA Funding Per Capita")
+plt.xlabel("Funding per capita ($/person)")
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(8,6))
+plt.barh(bot["place_norm"], bot["funding_per_capita"])
+plt.gca().xaxis.set_major_formatter(FuncFormatter(dollar))
+plt.title("Large States Consistently Receive Lower IIJA Funding Per Capita")
+plt.xlabel("Funding per capita ($/person)")
+plt.tight_layout()
+plt.show()
+```
+
+Per-capita IIJA funding is strongly skewed toward smaller states and territories. While large states such as California, Texas, and New York receive substantial total funding, they rank among the lowest on a per-person basis. This suggests that allocation formulas include baseline or minimum funding amounts that benefit smaller populations.
+
+```{python}
+# plot 2 - per capita funding vs pop
+plt.figure(figsize=(8,5))
+plt.scatter(analysis["pop_2020"], analysis["funding_per_capita"], alpha=0.8)
+plt.xscale("log")
+plt.gca().yaxis.set_major_formatter(FuncFormatter(dollar))
+plt.title("Per-Capita Funding Decreases as Population Increases (Small-State Effect)")
+plt.xlabel("Population (log scale; 2020)")
+plt.ylabel("Funding per capita ($/person)")
+plt.tight_layout()
+plt.show()
+```
+
+The log-scale scatter plot shows a clear negative relationship between population size and per-capita funding. Smaller states are concentrated at much higher funding levels per person, confirming a consistent small-state advantage instead of random variation.
+
+```{python}
+# plot 3 - equity index
+eq_hi = analysis.sort_values("equity_index", ascending=False).head(20).sort_values("equity_index")
+eq_lo = analysis.sort_values("equity_index", ascending=True).head(20).sort_values("equity_index")
+
+plt.figure(figsize=(8,7))
+plt.barh(eq_hi["place_norm"], eq_hi["equity_index"])
+plt.axvline(1.0, linestyle="--")
+plt.title("Highest Equity Index Values Are Concentrated in Small States and Territories")
+plt.xlabel("Equity index (1.0 = proportional)")
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(8,7))
+plt.barh(eq_lo["place_norm"], eq_lo["equity_index"])
+plt.axvline(1.0, linestyle="--")
+plt.title("Most Large States Receive Less Than Their Population Share of IIJA Funding")
+plt.xlabel("Equity index (1.0 = proportional)")
+plt.tight_layout()
+plt.show()
+```
+
+Most Large States Receive Less Than Their Population Share of IIJA Funding.
+
+Overall, the allocation is not strictly proportional to population. The per-capita charts and the log-population scatter show that smaller states or territories often receive more funding per person, while larger states tend to receive less per person. The equity index reinforces this pattern: many places have values noticeably above 1.0 , while others fall below 1.0.
+This pattern suggests the allocation formula likely includes baseline amounts or program design features that create a small-population advantage, rather than distributing funds purely in proportion to population. Smaller states and territories systematically receive higher per-capita IIJA funding, indicating a structural small-population advantage rather than proportional allocation by population.
+
+
+## Question 2
+
+```{python}
+# biden winning states
+biden_states = {
+    "Arizona","California","Colorado","Connecticut","Delaware","District of Columbia","Georgia","Hawaii",
+    "Illinois","Maine","Maryland","Massachusetts","Michigan","Minnesota","Nevada","New Hampshire",
+    "New Jersey","New Mexico","New York","Oregon","Pennsylvania","Rhode Island","Vermont","Virginia",
+    "Washington","Wisconsin"
+}
+
+analysis["biden_win"] = analysis["place_norm"].isin(biden_states)
+
+# For politics, keep states + DC; exclude territories + Puerto Rico
+exclude = {"Guam","American Samoa","Northern Mariana Islands","U.S. Virgin Islands","Puerto Rico"}
+states_only = analysis[~analysis["place_norm"].isin(exclude)].copy()
+states_only[["place_norm","biden_win","funding_per_capita","pop_2020"]].head()
+
+# plot - per capita funding
+biden_pc = states_only.loc[states_only["biden_win"], "funding_per_capita"].dropna()
+other_pc = states_only.loc[~states_only["biden_win"], "funding_per_capita"].dropna()
+
+plt.figure(figsize=(7,5))
+plt.boxplot([biden_pc, other_pc], labels=["Biden-win (2020)", "Non-Biden-win (2020)"])
+plt.gca().yaxis.set_major_formatter(FuncFormatter(dollar))
+plt.title("No Clear Per-Capita Advantage for Biden-Won States After Accounting for Population")
+plt.ylabel("Funding per capita ($/person)")
+plt.tight_layout()
+plt.show()
+```
+
+After controlling for population size, there is no clear evidence that Biden-won states receive higher per-capita IIJA funding. The regression shows population is the dominant driver of per-capita allocation, while political alignment is not statistically meaningful.
+
+log(per-capita)=β0​+β1​log(population)+β2​⋅BidenWin+ϵ
+
+```{python}
+
+print("Rows in analysis:", len(analysis))
+print("Rows in states_only:", len(states_only))
+
+# Show the top unmatched places 
+unmatched = merged.loc[merged["pop_2020"].isna(), ["place", "place_norm", "funding_bil"]].sort_values("funding_bil", ascending=False)
+print("\nUnmatched places (need name fixes in norm_place):")
+display(unmatched.head(15))
+
+s = states_only[(states_only["funding_per_capita"] > 0) & (states_only["pop_2020"] > 0)].copy()
+
+if len(s) < 3:
+    print("\nNot enough matched state rows to run regression (need at least ~3).")
+else:
+    s["log_pc"] = np.log(s["funding_per_capita"])
+    s["log_pop"] = np.log(s["pop_2020"])
+
+    X = pd.DataFrame({
+        "log_pop": s["log_pop"],
+        "biden_win": s["biden_win"].astype(int)
+    })
+    X = sm.add_constant(X)
+
+    model = sm.OLS(s["log_pc"], X).fit()
+    display(model.summary())
+```
+
+After controlling for population size, there is no clear evidence that Biden-won states receive higher per-capita IIJA funding. In this dataset, the Biden-win coefficient is slightly negative and only marginally significant, while population size has a strong negative relationship with per-capita funding. Any apparent political “favoring” in raw comparisons can be explained by the strong small-state effect (many smaller states receive higher per-capita funding regardless of politics). The regression provides the more defensible test and does not support systematic favoritism toward Biden-aligned states.
