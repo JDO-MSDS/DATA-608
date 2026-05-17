@@ -1,0 +1,648 @@
+---
+title: "DATA 608 Story 2: Can the FED Control Inflation and Maintain Full Employment?"
+subtitle: "25 Years of Monetary Policy — The Data Tells the Story"
+author: "Joao De Oliveira"
+date: "5/14/2026"
+format:
+  pdf:
+    toc: true
+    toc-depth: 2
+    number-sections: false
+    colorlinks: true
+    fig-pos: "H"
+    geometry:
+      - margin=1in
+    fontsize: 11pt
+    include-in-header:
+      text: |
+        \usepackage{float}
+execute:
+  echo: false
+  warning: false
+  message: false
+jupyter: python3
+---
+
+## Story Development Focus
+
+**Focus points addressed:** Technology & Tools (API data access) · Story Framework · Visual Selection Framework · Slide Messaging Technique
+
+This story uses the **FRED API** (Federal Reserve Economic Data, St. Louis Fed) to pull live data programmatically — earning the 20-point bonus. All three required series are fetched directly from the source:
+
+| Series | FRED ID | Source |
+|--------|---------|--------|
+| Consumer Price Index (CPI YoY%) | `CPIAUCSL` | Bureau of Labor Statistics |
+| Federal Funds Rate | `FEDFUNDS` | Federal Reserve Board |
+| Unemployment Rate | `UNRATE` | Bureau of Labor Statistics |
+
+**Visual selection rationale:**
+
+| Figure | Chart Type | Why |
+|--------|-----------|-----|
+| 1 | Three-panel time series | Shows each variable individually with full detail before combining |
+| 2 | Annotated dual-axis timeline | Reveals the lagged policy sequence: CPI rises → FED hikes → unemployment rises |
+| 3 | Scatter: Fed Rate vs CPI | Tests whether rate hikes actually correlate with inflation control |
+| 4 | Scatter: Fed Rate vs Unemployment | Tests the Phillips Curve — the core tension in the mandate |
+| 5 | Regime comparison heatmap | Summarizes average performance across five distinct policy eras |
+
+**Story framework:** Mandate explanation → Individual series → The lag sequence → Correlation analysis → Verdict
+
+**Audience:** Financially literate general audience — students, analysts, policy-watchers.
+
+---
+
+## Data Collection via FRED API
+
+```{python}
+#| label: install
+
+import subprocess, sys
+
+def ensure(pkg):
+    try:
+        __import__(pkg.replace("-","_"))
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", pkg, "-q"])
+
+for pkg in ["pandas", "matplotlib", "numpy", "scipy", "requests", "fredapi"]:
+    ensure(pkg)
+print("Packages ready.")
+```
+
+```{python}
+#| label: api-fetch
+
+# ============================================================
+# FRED API DATA PULL
+# ============================================================
+# Series IDs:
+#   CPIAUCSL  - CPI for All Urban Consumers (BLS)
+#   FEDFUNDS  - Effective Federal Funds Rate (Fed Board)
+#   UNRATE    - Civilian Unemployment Rate (BLS)
+#
+# FRED API key — registered at https://fred.stlouisfed.org/docs/api/api_key.html
+# ============================================================
+
+import requests
+import pandas as pd
+import numpy as np
+import warnings
+warnings.filterwarnings("ignore")
+
+FRED_API_KEY = "ba3e349112a6053b380581569f0af2e3"   
+START_DATE   = "2000-01-01"
+END_DATE     = "2024-12-31"
+BASE_URL     = "https://api.stlouisfed.org/fred/series/observations"
+
+def fetch_fred(series_id, api_key, start, end):
+    """Fetch a FRED series via the REST API, return a dated pandas Series."""
+    params = {
+        "series_id"         : series_id,
+        "api_key"           : api_key,
+        "file_type"         : "json",
+        "observation_start" : start,
+        "observation_end"   : end,
+        "frequency"         : "m",   
+    }
+    try:
+        resp = requests.get(BASE_URL, params=params, timeout=10)
+        resp.raise_for_status()
+        obs  = resp.json()["observations"]
+        s    = (pd.DataFrame(obs)[["date","value"]]
+                  .assign(date=lambda d: pd.to_datetime(d["date"]),
+                          value=lambda d: pd.to_numeric(d["value"], errors="coerce"))
+                  .set_index("date")["value"]
+                  .rename(series_id))
+        print(f"  FRED API: {series_id} — {len(s)} observations fetched")
+        return s
+    except Exception as e:
+        raise RuntimeError(f"FRED API error for {series_id}: {e}") from e
+
+print("Fetching data from FRED API...")
+s_cpi  = fetch_fred("CPIAUCSL",  FRED_API_KEY, START_DATE, END_DATE)
+s_fed  = fetch_fred("FEDFUNDS",  FRED_API_KEY, START_DATE, END_DATE)
+s_unem = fetch_fred("UNRATE",    FRED_API_KEY, START_DATE, END_DATE)
+
+# unified DataFrame
+# CPI comes as index levels — convert to year-over-year % change
+cpi_series  = s_cpi.resample("MS").last().pct_change(12) * 100
+fed_series  = s_fed.resample("MS").last()
+unem_series = s_unem.resample("MS").last()
+
+df = pd.DataFrame({
+    "cpi" : cpi_series,
+    "fed" : fed_series,
+    "unem": unem_series,
+}).dropna()
+
+print(f"\nData ready: {len(df)} monthly observations ({df.index[0].year}-{df.index[-1].year})")
+print(df.tail(3).round(2))
+```
+
+```{python}
+#| label: style-setup
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import matplotlib.ticker as mticker
+import matplotlib.colors as mcolors
+from scipy import stats
+
+RED    = "#C0392B"
+BLUE   = "#2471A3"
+GREEN  = "#1A7A4A"
+AMBER  = "#E67E22"
+PURPLE = "#7D3C98"
+BG     = "#FAFAF8"
+MUTED  = "#6B6B66"
+BORDER = "#DCDBD3"
+
+plt.rcParams.update({
+    "figure.facecolor" : BG,
+    "axes.facecolor"   : BG,
+    "axes.edgecolor"   : BORDER,
+    "axes.grid"        : True,
+    "grid.color"       : BORDER,
+    "grid.linewidth"   : 0.5,
+    "grid.alpha"       : 0.7,
+    "font.family"      : "DejaVu Sans",
+    "text.color"       : "#1A1A18",
+    "axes.labelcolor"  : MUTED,
+    "xtick.color"      : MUTED,
+    "ytick.color"      : MUTED,
+})
+
+KICKER = "STORY 2  ·  DATA 608  ·  KNOWLEDGE & VISUAL ANALYTICS"
+SOURCE = "Sources: FRED API — CPIAUCSL (BLS), FEDFUNDS (Federal Reserve Board), UNRATE (BLS)  |  2000–2024"
+
+REGIMES = [
+    ("2000-01","2001-12", "Dot-com\nbust",    0.3),
+    ("2002-01","2007-12", "Goldilocks\nera",  0.15),
+    ("2008-01","2009-12", "Great\nRecession", 0.3),
+    ("2010-01","2019-12", "Low-rate\nrecovery", 0.15),
+    ("2020-01","2021-06", "COVID-19",         0.3),
+    ("2021-07","2024-12", "Inflation\nsurge + hikes", 0.3),
+]
+```
+
+\newpage
+
+## The FED's Dual Mandate: A Built-In Tension
+
+In June 2022, Americans were paying 9.1% more for groceries, gas, and rent than they had a year earlier — the highest inflation rate in 40 years. The Federal Reserve responded with the most aggressive rate-hiking campaign since the 1980s. Within two years, borrowing costs for mortgages had doubled. Hundreds of thousands of workers lost their jobs as companies cut costs. Inflation came down — but at a price.
+
+This is the tension at the heart of the Federal Reserve's mission. Congress gave the FED two goals — and they are fundamentally at odds:
+
+- **Control inflation** — keep price increases near 2% per year so that savings hold their value and families can plan for the future
+- **Maintain full employment** — keep unemployment low so that workers can find jobs and businesses can grow
+
+The FED's only lever is the **Federal Funds Rate** — the interest rate banks charge each other overnight, which ripples through every loan, mortgage, and business investment in the country. Raise it, and you slow inflation — but also slow hiring. Cut it, and jobs return — but prices can run hot.
+
+Twenty-five years of data give us the evidence to answer the question Congress never fully resolved: *can the FED actually do both at once?*
+
+```{python}
+#| label: fig-three-panel
+#| fig-cap: "The three variables of the FED's dual mandate — CPI inflation, Federal Funds Rate, and unemployment rate — from January 2000 to December 2024. Data pulled via FRED API from CPIAUCSL, FEDFUNDS, and UNRATE series."
+#| fig-height: 8.0
+#| fig-width: 10
+
+fig1, axes = plt.subplots(3, 1, figsize=(10, 8.0), sharex=True)
+fig1.patch.set_facecolor(BG)
+
+panels = [
+    (df["cpi"],  RED,   "CPI Inflation (YoY %)",
+     "Inflation (CPI YoY %)", 2.0, "2% target"),
+    (df["fed"],  BLUE,  "Federal Funds Rate (%)",
+     "Fed Funds Rate (%)", None, None),
+    (df["unem"], GREEN, "Unemployment Rate (%)",
+     "Unemployment (%)", 4.0, "~4% full employment"),
+]
+
+for ax, (data, color, title, ylabel, ref, ref_label) in zip(axes, panels):
+    ax.set_facecolor(BG)
+    ax.fill_between(data.index, data, alpha=0.15, color=color)
+    ax.plot(data.index, data, color=color, linewidth=1.8, zorder=4)
+    if ref:
+        ax.axhline(ref, color=MUTED, linewidth=1.2, linestyle="--", zorder=3)
+        ax.text(df.index[-1], ref + 0.15, ref_label,
+                ha="right", fontsize=8, color=MUTED)
+    ax.set_ylabel(ylabel, fontsize=9.5, color=MUTED)
+    ax.set_title(title, fontsize=10, fontweight="bold", loc="left", pad=4)
+    ax.spines[["top","right"]].set_visible(False)
+    ax.spines[["left","bottom"]].set_color(BORDER)
+    ax.set_axisbelow(True)
+    # Shade COVID spike
+    ax.axvspan(pd.Timestamp("2020-02"), pd.Timestamp("2020-06"),
+               alpha=0.10, color=AMBER, zorder=1)
+
+axes[2].set_xlabel("Year", fontsize=10, color=MUTED)
+
+fig1.text(0.08, 0.985, KICKER,
+          fontsize=8.5, color=MUTED, va="top", transform=fig1.transFigure)
+fig1.text(0.08, 0.958,
+          "Three variables, one mandate — 25 years of the FED balancing act",
+          fontsize=13, fontweight="bold", va="top", transform=fig1.transFigure)
+fig1.text(0.08, 0.935,
+          "CPI inflation  |  Federal Funds Rate  |  Unemployment  |  2000–2024  "
+          "|  Dashed lines = policy targets",
+          fontsize=9.5, color=MUTED, va="top", transform=fig1.transFigure)
+fig1.text(0.08, 0.01, SOURCE,
+          fontsize=7.5, color=MUTED, va="bottom", transform=fig1.transFigure)
+
+plt.tight_layout(rect=[0, 0.03, 1, 0.925])
+plt.show()
+```
+
+Three patterns jump out of these charts immediately — and together they begin to tell the story:
+
+1. **Inflation** ran quietly near 2% for nearly two decades, then erupted in 2021–2022 before slowly retreating. It was not a gradual drift — it was a spike, and it caught almost everyone off guard.
+2. **The Fed Funds Rate** did not move *with* inflation — it moved *after* it. Every time prices rose, the FED waited, watched, then acted. The lag is visible in the chart, and it is not accidental — it is structural.
+3. **Unemployment** tells the cruelest part of the story. It spikes sharply in crises (2001, 2008, 2020), then recovers — slowly, painfully — over years. The people who lose their jobs during a downturn do not get them back when the next chart looks better.
+
+These three lines are not just data series. They represent the living conditions of millions of American households. The next three charts show how they interact — and what that means for the FED's ability to manage both.
+
+\newpage
+
+## Act II: The Sequence — Inflation Arrives, the FED Reacts, Workers Pay the Price
+
+Here is how the story always unfolds. Prices rise first — driven by supply shocks, energy costs, or surging demand. The FED watches, collects data, debates, and eventually acts. By the time rates go up, inflation is already embedded in wages, rents, and expectations. Then — months or even years later — higher borrowing costs finally cool the economy. Businesses slow hiring. Some lay workers off. Unemployment rises. The FED has done its job on inflation, but the cost has been paid by the workforce.
+
+This sequence — **inflation first, rate hikes second, unemployment third** — has repeated itself in every major economic cycle of the last 25 years. The chart below makes it unmistakable.
+
+```{python}
+#| label: fig-annotated-timeline
+#| fig-cap: "Annotated timeline showing the policy sequence across five major economic cycles. The FED raises rates after CPI rises; unemployment peaks after rate hikes begin. Data: FRED API."
+#| fig-height: 6.5
+#| fig-width: 10
+
+fig2, ax2 = plt.subplots(figsize=(10, 6.5))
+fig2.patch.set_facecolor(BG)
+ax2.set_facecolor(BG)
+
+# primary axis: CPI and unemployment
+ax2.fill_between(df.index, df["cpi"], alpha=0.12, color=RED)
+ax2.plot(df.index, df["cpi"],  color=RED,   linewidth=2.0,
+         label="CPI Inflation (YoY %)", zorder=4)
+ax2.fill_between(df.index, df["unem"], alpha=0.12, color=GREEN)
+ax2.plot(df.index, df["unem"], color=GREEN, linewidth=2.0,
+         label="Unemployment Rate (%)", zorder=4)
+ax2.set_ylabel("CPI % / Unemployment %", fontsize=10, color=MUTED)
+ax2.set_ylim(-2, 18)
+
+# secondary axis: fed funds rate
+ax_r = ax2.twinx()
+ax_r.set_facecolor("none")
+ax_r.fill_between(df.index, df["fed"], alpha=0.10, color=BLUE)
+ax_r.plot(df.index, df["fed"], color=BLUE, linewidth=1.8,
+          linestyle="--", label="Fed Funds Rate (%)", zorder=3)
+ax_r.set_ylabel("Federal Funds Rate (%)", fontsize=10, color=BLUE)
+ax_r.set_ylim(-1, 10)
+ax_r.spines["right"].set_color(BLUE)
+ax_r.tick_params(axis="y", colors=BLUE)
+
+# target lines
+ax2.axhline(2.0, color=RED,   linewidth=0.9, linestyle=":", alpha=0.7)
+ax2.axhline(4.0, color=GREEN, linewidth=0.9, linestyle=":", alpha=0.7)
+
+# Annotate key policy moments
+events = [
+    ("2001-09", 9.0,  "9/11 & Dot-com crash\n(rates cut to 1%)", BLUE,  -3.0),
+    ("2005-01", 13.5, "Recovery hikes begin\n(2004-2006)", GREEN, -3.0),
+    ("2008-10", 16.5, "Financial Crisis\n(rates to 0%)", RED,   -3.0),
+    ("2020-04", 16.5, "COVID emergency\nrate cut", AMBER, -3.0),
+    ("2022-06", 11.5, "2022 inflation hikes\n(fastest in 40 yrs)", RED,  -3.0),
+]
+for date, y_text, label, color, y_offset in events:
+    xd = pd.Timestamp(date)
+    y_arrow = y_text + y_offset
+    ax2.annotate(label,
+                 xy=(xd, max(y_arrow, 0.5)), xytext=(xd, y_text),
+                 fontsize=7.5, color=color, fontweight="bold",
+                 ha="center", va="bottom",
+                 arrowprops=dict(arrowstyle="->", color=color, lw=1.0))
+
+# combined legend
+lines1, labs1 = ax2.get_legend_handles_labels()
+lines2, labs2 = ax_r.get_legend_handles_labels()
+ax2.legend(lines1+lines2, labs1+labs2, loc="upper left",
+           fontsize=9, framealpha=0.7, edgecolor=BORDER)
+
+ax2.set_xlabel("Year", fontsize=10, color=MUTED)
+ax2.spines[["top","right"]].set_visible(False)
+ax2.spines[["left","bottom"]].set_color(BORDER)
+ax2.set_axisbelow(True)
+
+fig2.text(0.08, 0.97, KICKER,
+          fontsize=8.5, color=MUTED, va="top", transform=fig2.transFigure)
+fig2.text(0.08, 0.93,
+          "The FED always acts late — it raises rates after inflation has already arrived",
+          fontsize=13, fontweight="bold", va="top", transform=fig2.transFigure)
+fig2.text(0.08, 0.88,
+          "CPI (red) and unemployment (green) on left axis  |  "
+          "Fed Funds Rate (blue dashed) on right axis",
+          fontsize=9.5, color=MUTED, va="top", transform=fig2.transFigure)
+fig2.text(0.08, 0.02, SOURCE,
+          fontsize=7.5, color=MUTED, va="bottom", transform=fig2.transFigure)
+
+plt.tight_layout(rect=[0, 0.04, 1, 0.87])
+plt.show()
+```
+
+The lag is structural, not a failure of competence. The FED operates on data that is always backward-looking — it cannot know inflation is coming until it has already arrived. By the time the FOMC votes to raise rates, inflation has already eaten into household budgets. By the time higher rates cool spending, the labor market has already started softening.
+
+This is the unavoidable rhythm of monetary policy — and it means that the FED is always fighting the last war, not the current one. The question is not whether the FED acts. The data shows clearly that it always does. The question is whether acting is enough.
+
+\newpage
+
+## Act III: Does the Medicine Actually Work?
+
+The FED's rate hikes are painful — they raise mortgage payments, slow business investment, and eventually cost people their jobs. But do they actually bring inflation down? The scatter plot below tests the core claim: when inflation is high today, does the FED raise rates — and does that eventually matter?
+
+```{python}
+#| label: fig-scatter-fed-cpi
+#| fig-cap: "Scatter plot showing that high CPI inflation predicts higher Federal Funds Rate 12 months later — the actual FED policy response mechanism. Each dot = one month. Sources: FRED API."
+#| fig-height: 5.5
+#| fig-width: 10
+
+# correct causal direction: high CPI today → FED raises rates 12 months later
+df_lag = pd.DataFrame({
+    "cpi_now"    : df["cpi"],
+    "fed_12m"    : df["fed"].shift(-12),   
+}).dropna()
+
+slope, intercept, r, p, _ = stats.linregress(df_lag["cpi_now"], df_lag["fed_12m"])
+x_line = np.linspace(df_lag["cpi_now"].min(), df_lag["cpi_now"].max(), 100)
+
+# Color dots by era
+era_colors = []
+for idx in df_lag.index:
+    yr = idx.year
+    if yr <= 2001:      era_colors.append(AMBER)
+    elif yr <= 2007:    era_colors.append(GREEN)
+    elif yr <= 2009:    era_colors.append(RED)
+    elif yr <= 2021:    era_colors.append(BLUE)
+    else:               era_colors.append(PURPLE)
+
+fig3, ax3 = plt.subplots(figsize=(10, 5.5))
+fig3.patch.set_facecolor(BG)
+
+ax3.scatter(df_lag["cpi_now"], df_lag["fed_12m"],
+            c=era_colors, s=30, alpha=0.65,
+            edgecolors="white", linewidth=0.3, zorder=4)
+ax3.plot(x_line, slope*x_line + intercept, "--", color=PURPLE,
+         linewidth=2.0, zorder=3, label=f"Trend  (r = {r:.2f})")
+
+ax3.axhline(2.0, color=BLUE, linewidth=1.2, linestyle=":",
+            label="Neutral rate (~2%)")
+ax3.axvline(2.0, color=RED,  linewidth=1.2, linestyle=":",
+            label="2% inflation target")
+
+ax3.set_xlabel("CPI Inflation (%) — current month", fontsize=10, color=MUTED)
+ax3.set_ylabel("Federal Funds Rate (%) — 12 months later", fontsize=10, color=MUTED)
+ax3.set_ylim(-1, 6.5)  
+ax3.spines[["top","right"]].set_visible(False)
+ax3.spines[["left","bottom"]].set_color(BORDER)
+ax3.set_axisbelow(True)
+
+era_patches = [
+    mpatches.Patch(color=AMBER,  label="Dot-com era (2000-01)"),
+    mpatches.Patch(color=GREEN,  label="Goldilocks (2002-07)"),
+    mpatches.Patch(color=RED,    label="Financial crisis (2008-09)"),
+    mpatches.Patch(color=BLUE,   label="Low-rate recovery (2010-21)"),
+    mpatches.Patch(color=PURPLE, label="Inflation surge (2022-24)"),
+    mpatches.Patch(color=PURPLE, fill=False, edgecolor=PURPLE, linewidth=1.5,
+                   label=f"Trend  r = {r:.2f}"),
+]
+ax3.legend(handles=era_patches,
+           loc="upper left", fontsize=8.5, framealpha=0.7, edgecolor=BORDER)
+
+fig3.text(0.08, 0.97, KICKER,
+          fontsize=8.5, color=MUTED, va="top", transform=fig3.transFigure)
+fig3.text(0.08, 0.925,
+          "When inflation rises, the FED always follows — confirming the policy response",
+          fontsize=13, fontweight="bold", va="top", transform=fig3.transFigure)
+fig3.text(0.08, 0.875,
+          "CPI inflation (now) vs. Federal Funds Rate 12 months later  |  "
+          "Each dot = one month  |  r = correlation strength",
+          fontsize=9.5, color=MUTED, va="top", transform=fig3.transFigure)
+fig3.text(0.08, 0.02, SOURCE,
+          fontsize=7.5, color=MUTED, va="bottom", transform=fig3.transFigure)
+
+plt.tight_layout(rect=[0, 0.04, 1, 0.865])
+plt.show()
+```
+
+The FED's response is reliable and consistent — every significant inflation episode in the data was followed by rate hikes within 6 to 12 months (r = 0.60). The FED does its job. It reads the data and it acts.
+
+But here is where the story gets complicated. The correlation shows that high inflation *predicts* rate hikes — not that rate hikes *cure* inflation. In 2021–2022, inflation was driven by supply-chain bottlenecks, energy shocks from the war in Ukraine, and pandemic-era shortages — forces that interest rates cannot directly address. The FED raised rates anyway, because it was the only tool it had. Workers eventually bore the cost through slower hiring and rising unemployment. The inflation did come down — but economists still debate how much of that was the rate hikes versus supply chains simply normalizing on their own.
+
+This is the uncomfortable truth at the center of the dual mandate story: the FED has one instrument, but the economy has many causes.
+
+So the FED acts consistently — but does acting actually produce the trade-off the mandate assumes? That is, when the FED raises rates to fight inflation, does it inevitably push unemployment up — and can it ever avoid doing both at once?
+
+\newpage
+
+## Act IV: The Trade-Off — Can You Have Low Inflation AND Low Unemployment?
+
+For decades, economists believed in a simple trade-off: low unemployment causes inflation, and fighting inflation causes unemployment. This relationship — the **Phillips Curve** — was the theoretical backbone of monetary policy. If it holds, then the dual mandate is not just difficult; it is mathematically impossible to achieve simultaneously. The scatter plot below puts it to the test using 25 years of real data.
+
+```{python}
+#| label: fig-phillips
+#| fig-cap: "The Phillips Curve: unemployment rate vs. CPI inflation, colored by era. The classic theory predicts a negative relationship — lower unemployment → higher inflation. Sources: FRED API."
+#| fig-height: 5.5
+#| fig-width: 10
+
+slope_pc, intercept_pc, r_pc, p_pc, _ = stats.linregress(df["unem"], df["cpi"])
+x_pc = np.linspace(df["unem"].min(), df["unem"].max(), 100)
+
+era_colors2 = []
+for idx in df.index:
+    yr = idx.year
+    if yr <= 2001:   era_colors2.append(AMBER)
+    elif yr <= 2007: era_colors2.append(GREEN)
+    elif yr <= 2009: era_colors2.append(RED)
+    elif yr <= 2021: era_colors2.append(BLUE)
+    else:            era_colors2.append(PURPLE)
+
+fig4, ax4 = plt.subplots(figsize=(10, 5.5))
+fig4.patch.set_facecolor(BG)
+
+ax4.scatter(df["unem"], df["cpi"],
+            c=era_colors2, s=30, alpha=0.65,
+            edgecolors="white", linewidth=0.3, zorder=4)
+ax4.plot(x_pc, slope_pc*x_pc + intercept_pc, "--", color=PURPLE,
+         linewidth=2.0, zorder=3,
+         label=f"Trend  (r = {r_pc:.2f})")
+
+ax4.axhline(2.0, color=RED,   linewidth=1.2, linestyle=":", label="2% inflation target")
+ax4.axvline(4.0, color=GREEN, linewidth=1.2, linestyle=":", label="~4% full employment")
+
+# annotate key clusters
+ax4.annotate("COVID spike\n(April 2020)",
+             xy=(14.7, 0.3), xytext=(12.5, 2.5),
+             fontsize=8, color=AMBER,
+             arrowprops=dict(arrowstyle="->", color=AMBER, lw=1.0))
+ax4.annotate("2022 inflation\npeak",
+             xy=(3.6, 9.1), xytext=(5.5, 9.5),
+             fontsize=8, color=PURPLE,
+             arrowprops=dict(arrowstyle="->", color=PURPLE, lw=1.0))
+
+ax4.set_xlabel("Unemployment Rate (%)", fontsize=10, color=MUTED)
+ax4.set_ylabel("CPI Inflation (YoY %)", fontsize=10, color=MUTED)
+ax4.spines[["top","right"]].set_visible(False)
+ax4.spines[["left","bottom"]].set_color(BORDER)
+ax4.set_axisbelow(True)
+
+era_patches2 = [
+    mpatches.Patch(color=AMBER,  label="Dot-com era (2000–01)"),
+    mpatches.Patch(color=GREEN,  label="Goldilocks (2002–07)"),
+    mpatches.Patch(color=RED,    label="Financial crisis (2008–09)"),
+    mpatches.Patch(color=BLUE,   label="Low-rate recovery (2010–21)"),
+    mpatches.Patch(color=PURPLE, label="Inflation surge (2022–24)"),
+    mpatches.Patch(color=PURPLE, label=f"Overall trend  r = {r_pc:.2f}",
+                   fill=False, edgecolor=PURPLE, linewidth=1.5),
+]
+ax4.legend(handles=era_patches2,
+           loc="upper right", fontsize=8.5,
+           framealpha=0.7, edgecolor=BORDER)
+
+fig4.text(0.08, 0.97, KICKER,
+          fontsize=8.5, color=MUTED, va="top", transform=fig4.transFigure)
+fig4.text(0.08, 0.925,
+          "The Phillips Curve is real — but it breaks down in supply-shock environments",
+          fontsize=13, fontweight="bold", va="top", transform=fig4.transFigure)
+fig4.text(0.08, 0.875,
+          "Unemployment rate vs. CPI inflation  |  Each dot = one month  "
+          "|  Negative r = classic Phillips Curve relationship",
+          fontsize=9.5, color=MUTED, va="top", transform=fig4.transFigure)
+fig4.text(0.08, 0.02, SOURCE,
+          fontsize=7.5, color=MUTED, va="bottom", transform=fig4.transFigure)
+
+plt.tight_layout(rect=[0, 0.04, 1, 0.865])
+plt.show()
+```
+
+The Phillips Curve is real — and visible in the data (r = -0.43). Over the full 25-year period, lower unemployment does tend to coincide with higher inflation. The FED's fear of a "tight labor market" causing prices to spiral is not unfounded.
+
+But look at the upper-left cluster: the 2021–2022 inflation surge. Unemployment was near historic lows — *and* inflation hit 9%. The classic trade-off completely broke down. Supply chains, not wages, were driving prices. The FED raised rates anyway, because it was all it could do. The result was rising unemployment *and* persistent inflation for over a year — exactly what the dual mandate is supposed to prevent.
+
+This is the crack in the foundation. The Phillips Curve assumes inflation is demand-driven. When it isn't, the FED's playbook does not fit the problem — and the mandate becomes nearly impossible to fulfill.
+
+\newpage
+
+## The Verdict: Five Eras, Five Different Report Cards
+
+Twenty-five years. Five distinct economic chapters. Each one asked the same question of the FED: can you keep inflation near 2% *and* unemployment near 4% — at the same time? The chart below gives each era a grade.
+
+```{python}
+#| label: fig-regime-summary
+#| fig-cap: "Policy era summary: average CPI, Fed Funds Rate, and unemployment across five major economic regimes. Source: FRED API."
+#| fig-height: 5.5
+#| fig-width: 10
+
+eras = {
+    "Dot-com\nbust\n2000–01"     : ("2000-01","2001-12"),
+    "Goldilocks\nera\n2002–07"   : ("2002-01","2007-12"),
+    "Great\nRecession\n2008–09"  : ("2008-01","2009-12"),
+    "Low-rate\nrecovery\n2010–21": ("2010-01","2021-06"),
+    "Inflation\nsurge\n2021–24"  : ("2021-07","2024-12"),
+}
+
+era_labels, era_cpi, era_fed, era_unem, era_ok = [], [], [], [], []
+for label, (start, end) in eras.items():
+    sub = df[start:end]
+    avg_cpi  = sub["cpi"].mean()
+    avg_fed  = sub["fed"].mean()
+    avg_unem = sub["unem"].mean()
+    era_labels.append(label)
+    era_cpi.append(avg_cpi)
+    era_fed.append(avg_fed)
+    era_unem.append(avg_unem)
+    # "success" = CPI near 2% and unemployment near/below 5%
+    ok = "Both targets\napprox. met" if (1.0 <= avg_cpi <= 3.5 and avg_unem <= 5.5) else "At least one\ntarget missed"
+    era_ok.append(ok)
+
+x = np.arange(len(era_labels))
+w = 0.25
+
+fig5, ax5 = plt.subplots(figsize=(10, 5.5))
+fig5.patch.set_facecolor(BG)
+
+b1 = ax5.bar(x - w, era_cpi,  w, color=RED,   alpha=0.85, label="Avg CPI YoY %",      zorder=3)
+b2 = ax5.bar(x,     era_fed,  w, color=BLUE,  alpha=0.85, label="Avg Fed Funds Rate %",zorder=3)
+b3 = ax5.bar(x + w, era_unem, w, color=GREEN, alpha=0.85, label="Avg Unemployment %",  zorder=3)
+
+for bars in [b1, b2, b3]:
+    for bar in bars:
+        h = bar.get_height()
+        ax5.text(bar.get_x() + bar.get_width()/2, h + 0.1,
+                 f"{h:.1f}%", ha="center", va="bottom", fontsize=8)
+
+# target reference lines
+ax5.axhline(2.0, color=RED,   linewidth=1.0, linestyle=":", alpha=0.7)
+ax5.axhline(4.5, color=GREEN, linewidth=1.0, linestyle=":", alpha=0.7)
+
+ax5.set_xticks(x)
+ax5.set_xticklabels(era_labels, fontsize=9.5)
+ax5.set_ylabel("Average rate / % (during era)", fontsize=10, color=MUTED)
+ax5.set_ylim(0, 14)
+ax5.legend(fontsize=9.5, framealpha=0.7, edgecolor=BORDER, loc="upper left")
+ax5.spines[["top","right"]].set_visible(False)
+ax5.spines[["left","bottom"]].set_color(BORDER)
+ax5.set_axisbelow(True)
+
+# Verdict badges
+for i, ok in enumerate(era_ok):
+    color = GREEN if "met" in ok else RED
+    ax5.text(x[i], 12.5, ok, ha="center", fontsize=7.5,
+             color="white", fontweight="bold",
+             bbox=dict(boxstyle="round,pad=0.3", facecolor=color, alpha=0.85))
+
+fig5.text(0.08, 0.97, KICKER,
+          fontsize=8.5, color=MUTED, va="top", transform=fig5.transFigure)
+fig5.text(0.08, 0.925,
+          "The FED met both targets in two of five eras — and failed hardest when it mattered most",
+          fontsize=13, fontweight="bold", va="top", transform=fig5.transFigure)
+fig5.text(0.08, 0.875,
+          "Average CPI, Fed Funds Rate, and unemployment by policy era  |  "
+          "Green badge = both targets approx. met",
+          fontsize=9.5, color=MUTED, va="top", transform=fig5.transFigure)
+fig5.text(0.08, 0.02, SOURCE,
+          fontsize=7.5, color=MUTED, va="bottom", transform=fig5.transFigure)
+
+plt.tight_layout(rect=[0, 0.04, 1, 0.865])
+plt.show()
+```
+
+---
+
+## The Answer: Partially Yes — But Only When the Economy Cooperates
+
+The data has told its story. Here is what 25 years of evidence actually shows.
+
+The FED met both targets — inflation near 2% and unemployment near or below 5% — in two of five eras. The Goldilocks era (2002–2007) was the clearest success: steady growth, controlled prices, falling unemployment. The Dot-com era also largely held, though unemployment averaged 4.7% — borderline against the ~4% full employment benchmark — reflecting the slow hiring rebound after the 2001 recession. In both cases, the FED threaded the needle.
+
+But the FED fell short in the three eras that mattered most — the Great Recession, the long low-rate recovery, and the post-pandemic inflation surge. In each case, one leg of the mandate gave way. The 25-year record reveals three hard truths:
+
+**(1) The FED can fight inflation — but the cure has a cost.** Rate hikes work, eventually. The 2022–2024 hiking cycle brought inflation from 9.1% back toward 3%. But it took two years, and the workers who lost jobs or could not afford mortgages during that period paid a price that no chart captures.
+
+**(2) The FED can support full employment — but only in calm waters.** The 2010–2021 recovery was the FED's finest hour: patient, steady, and ultimately successful. Unemployment fell to 3.5% without igniting inflation. But this only worked because inflation stayed dormant on its own. The FED did not manage both variables simultaneously — it managed one while the other stayed quiet.
+
+**(3) The FED cannot do both when external shocks dominate — and in the modern economy, external shocks are the norm.** Supply chains, energy prices, pandemics, geopolitical crises — these are not rare events. When inflation is driven by these forces, raising interest rates is the wrong medicine administered because it is the only medicine available.
+
+The answer to the question Congress posed — *can the FED fulfill its dual mandate?* — is: **sometimes, under the right conditions, with significant collateral damage along the way.** Congress gave the FED two goals and one instrument. The last 25 years are a sustained argument for why that may never be enough.
+
+---
+
+## References
+
+Board of Governors of the Federal Reserve System. (2024). *Federal Funds Effective Rate* [FEDFUNDS]. FRED, Federal Reserve Bank of St. Louis. <https://fred.stlouisfed.org/series/FEDFUNDS>
+
+U.S. Bureau of Labor Statistics. (2024). *Consumer Price Index for All Urban Consumers: All Items in U.S. City Average* [CPIAUCSL]. FRED, Federal Reserve Bank of St. Louis. <https://fred.stlouisfed.org/series/CPIAUCSL>
+
+U.S. Bureau of Labor Statistics. (2024). *Unemployment Rate* [UNRATE]. FRED, Federal Reserve Bank of St. Louis. <https://fred.stlouisfed.org/series/UNRATE>
+
+Federal Reserve Bank of St. Louis. (2024). *FRED API Documentation.* <https://fred.stlouisfed.org/docs/api/fred/>
+
+Bernanke, B.S., & Mishkin, F.S. (1997). Inflation targeting: A new framework for monetary policy? *Journal of Economic Perspectives*, 11(2), 97–116.
+
+Phillips, A.W. (1958). The relation between unemployment and the rate of change of money wage rates in the United Kingdom, 1861–1957. *Economica*, 25(100), 283–299.
